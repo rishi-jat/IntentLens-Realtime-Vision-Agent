@@ -1,5 +1,3 @@
-<div align="center">
-
 # ◉ IntentLens — Real-Time Multi-Modal Vision Agent
 
 **Understand human intent in real time through computer vision, pose estimation, behavioral AI, and LLM reasoning.**
@@ -217,6 +215,8 @@ The frontend renders a cinematic heads-up display over the webcam feed:
 
 | Layer | Technology |
 |-------|-----------|
+| **Video Platform** | **Vision Agents by Stream** (`@stream-io/video-react-sdk`, `@stream-io/video-client`) |
+| **Video Tokens** | **Stream Chat SDK** (Python `stream-chat` — server-side token generation) |
 | Detection | YOLOv8n-pose (Ultralytics) |
 | Tracking | DeepSORT (appearance re-ID) |
 | Hand Tracking | MediaPipe Hands (21 landmarks) |
@@ -225,7 +225,6 @@ The frontend renders a cinematic heads-up display over the webcam feed:
 | Frontend | React 19 · TypeScript · Vite 7 |
 | STT | Web Speech API (SpeechRecognition) |
 | TTS | Web Speech Synthesis API |
-| Streaming | Stream Chat SDK |
 
 ---
 
@@ -330,9 +329,26 @@ The app opens at `http://localhost:5173`. Grant camera and microphone permission
 
 ---
 
+## 🏆 Hackathon Alignment
+
+How IntentLens maps to the **Vision Possible: Agent Protocol** judging criteria:
+
+| Criteria | How IntentLens Delivers |
+|----------|------------------------|
+| **Potential Impact** | Real-time behavioral understanding for security, retail analytics, smart spaces, and accessibility |
+| **Creativity & Innovation** | Combines pose estimation + gesture recognition + behavioral heuristics + LLM reasoning + voice interaction into one cohesive agent — goes far beyond simple object detection |
+| **Technical Excellence** | 9-component pipeline with temporal gesture confirmation, EMA-smoothed velocity, structured Scene Graph, anti-hallucination LLM prompts, and 3-layer rate limiting |
+| **Real-Time Performance** | Stream's edge network for <30ms video latency + 1 fps frame analysis + instant event narration |
+| **User Experience** | Jarvis-style neon HUD, voice conversation, proactive TTS narration, severity-colored event timeline |
+| **Best Use of Vision Agents** | Uses `@stream-io/video-react-sdk` + `@stream-io/video-client` for the video pipeline, `stream-chat` for token auth, leverages Stream's low-latency edge network |
+
+---
+
 ## 👤 Author
 
 **Rishi Jat** — [GitHub](https://github.com/rishi-jat)
+
+Built with ☕ for the [Vision Possible: Agent Protocol](https://www.wemakedevs.org/events/hackathons/vision-possible) hackathon by WeMakeDevs × Vision Agents by Stream.
 
 ## 📄 License
 
