@@ -40,9 +40,7 @@ export function FloatingHUD({
   return (
     <div className="floating-hud-container">
       {persons.map((person) => {
-        const [x1, y1, x2, y2] = person.bbox;
-        const bboxWidth = x2 - x1;
-        const bboxHeight = y2 - y1;
+        const [, y1, x2] = person.bbox;
         
         // Position HUD to the right of the person
         const hudX = x2 + 10;
