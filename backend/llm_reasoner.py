@@ -108,6 +108,10 @@ class LLMReasoner:
     # Global call budget: max 10 LLM calls per 60 seconds
     _global_call_timestamps: list[float] = []
     MAX_CALLS_PER_MINUTE: int = 10
+    # Reserve 3 slots in the budget exclusively for voice queries
+    VOICE_RESERVED_SLOTS: int = 3
+    # Quota-exhaustion flag — once set, skip ALL API calls until key is refreshed
+    _quota_exhausted: bool = False
 
     def __init__(self, openai_api_key: str) -> None:
         self._client: Optional[OpenAI] = (
@@ -123,20 +127,38 @@ class LLMReasoner:
 
     @property
     def available(self) -> bool:
-        return self._client is not None
+        return self._client is not None and not LLMReasoner._quota_exhausted
 
-    def _check_global_budget(self) -> bool:
-        """Return True if we are within the global LLM call budget."""
+    def _check_global_budget(self, is_voice: bool = False) -> bool:
+        """Return True if we are within the global LLM call budget.
+        
+        For frame-loop calls (is_voice=False), reserves VOICE_RESERVED_SLOTS
+        so voice queries always have room.
+        """
+        if LLMReasoner._quota_exhausted:
+            return False
         now = time.time()
-        # Prune old timestamps
         LLMReasoner._global_call_timestamps = [
             ts for ts in LLMReasoner._global_call_timestamps if now - ts < 60.0
         ]
-        return len(LLMReasoner._global_call_timestamps) < self.MAX_CALLS_PER_MINUTE
+        used = len(LLMReasoner._global_call_timestamps)
+        if is_voice:
+            # Voice gets the full budget
+            return used < self.MAX_CALLS_PER_MINUTE
+        else:
+            # Frame-loop must leave VOICE_RESERVED_SLOTS free for voice
+            return used < (self.MAX_CALLS_PER_MINUTE - self.VOICE_RESERVED_SLOTS)
 
     def _record_call(self) -> None:
         """Record that an LLM call was made."""
         LLMReasoner._global_call_timestamps.append(time.time())
+
+    def _handle_api_error(self, exc: Exception) -> None:
+        """Check if an API error means quota is exhausted and set the flag."""
+        exc_str = str(exc).lower()
+        if "insufficient_quota" in exc_str or "billing" in exc_str:
+            LLMReasoner._quota_exhausted = True
+            logger.error("OpenAI quota EXHAUSTED — all LLM calls disabled until key is refreshed")
 
     # ------------------------------------------------------------------
     # Per-person intent (rate-limited)
@@ -172,7 +194,7 @@ class LLMReasoner:
         if person.dwell_time < LLM_MIN_DWELL_FOR_CALL and not person.zones_entered:
             return cached or _DEFAULT_RESULT
 
-        if not self._check_global_budget():
+        if not self._check_global_budget(is_voice=False):
             logger.debug("Global LLM budget exhausted — returning cached for person %d", person.track_id)
             return cached or _DEFAULT_RESULT
 
@@ -204,7 +226,7 @@ class LLMReasoner:
         if not self.available or not all_signals:
             return self._cached_scene
 
-        if not self._check_global_budget():
+        if not self._check_global_budget(is_voice=False):
             logger.debug("Global LLM budget exhausted — returning cached scene")
             return self._cached_scene
 
@@ -303,7 +325,10 @@ class LLMReasoner:
         -------
         Conversational response string.
         """
-        if not self.available:
+        if LLMReasoner._quota_exhausted:
+            return "My AI service quota has been exceeded. Please add credits at platform.openai.com/account/billing and restart the server."
+
+        if not self._client:
             return "I'm currently unable to process voice queries — API key not configured."
 
         # Determine if this is a visual question that needs the frame
@@ -351,7 +376,7 @@ class LLMReasoner:
 
         # No retry loop — fail fast on errors, respect rate limits
         try:
-            if not self._check_global_budget():
+            if not self._check_global_budget(is_voice=True):
                 logger.warning("Global LLM budget exhausted for voice query")
                 return "I'm taking a short break to manage my resources. Try again in a moment."
 
@@ -387,10 +412,10 @@ class LLMReasoner:
             exc_str = str(exc).lower()
             logger.warning("Voice query failed: %s", exc)
 
-            # Quota exhausted — fail immediately, no retry
+            # Quota exhausted — set flag and fail immediately
             if "insufficient_quota" in exc_str or "billing" in exc_str:
-                logger.error("OpenAI quota exhausted — cannot make LLM calls")
-                return "I can't respond right now — my AI service quota has been exceeded."
+                self._handle_api_error(exc)
+                return "My AI service quota has been exceeded. Please add credits at platform.openai.com/account/billing and restart the server."
 
             # Rate limited — fail immediately, no retry
             if "rate" in exc_str or "429" in exc_str:
@@ -429,6 +454,7 @@ class LLMReasoner:
 
         except Exception as exc:
             logger.error("LLM call failed: %s", exc)
+            self._handle_api_error(exc)
             return _DEFAULT_RESULT
 
     @staticmethod
