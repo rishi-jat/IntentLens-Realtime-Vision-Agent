@@ -1,0 +1,17 @@
+# Backend
+backend/venv/
+backend/.env
+backend/__pycache__/
+*.pyc
+*.pt
+
+# Frontend
+frontend/intentlens-frontend/node_modules/
+frontend/intentlens-frontend/.env
+frontend/intentlens-frontend/dist/
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
