@@ -674,6 +674,17 @@
   box-shadow: 0 0 16px rgba(34, 255, 136, 0.2);
 }
 
+.voice-mic-btn.cooldown {
+  border-color: var(--text-dim);
+  color: var(--text-dim);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.voice-mic-btn.cooldown:hover {
+  box-shadow: none;
+}
+
 @keyframes mic-pulse {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.08); }
@@ -719,6 +730,12 @@
 
 .voice-status-idle {
   color: var(--text-dim);
+}
+
+.voice-status-cooldown {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-style: italic;
 }
 
 .voice-transcript-area {

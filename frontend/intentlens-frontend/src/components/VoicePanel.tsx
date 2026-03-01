@@ -45,7 +45,12 @@ export function VoicePanel({
 
   const [agentResponse, setAgentResponse] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  const [isCoolingDown, setIsCoolingDown] = useState(false);
   const sentTranscriptRef = useRef("");
+  const cooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Cooldown between consecutive voice queries (ms) */
+  const VOICE_COOLDOWN_MS = 4000;
 
   // Report listening state changes to parent (VideoFeed → StatusBar)
   useEffect(() => {
@@ -55,6 +60,7 @@ export function VoicePanel({
   // When listening stops and transcript is complete, send to backend
   useEffect(() => {
     if (!isComplete || !transcript || transcript === sentTranscriptRef.current) return;
+    if (isCoolingDown) return; // Reject during cooldown
     sentTranscriptRef.current = transcript;
 
     const sendQuery = async () => {
@@ -69,24 +75,42 @@ export function VoicePanel({
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Voice query failed";
-        console.error("Voice query error:", err);
-        setAgentResponse(`Voice error: ${msg}. Check backend logs.`);
+        // On 429, show friendly message
+        if (msg.includes("429") || msg.includes("rate") || msg.includes("cooldown")) {
+          setAgentResponse("I'm processing your last question. Please wait a moment.");
+        } else {
+          console.error("Voice query error:", err);
+          setAgentResponse(`Voice error: ${msg}`);
+        }
       } finally {
         setIsThinking(false);
+        // Start cooldown
+        setIsCoolingDown(true);
+        cooldownTimerRef.current = setTimeout(() => {
+          setIsCoolingDown(false);
+        }, VOICE_COOLDOWN_MS);
       }
     };
 
     void sendQuery();
-  }, [isComplete, transcript, getFrame, speak, ttsSupported]);
+  }, [isComplete, transcript, getFrame, speak, ttsSupported, isCoolingDown]);
+
+  // Cleanup cooldown timer
+  useEffect(() => {
+    return () => {
+      if (cooldownTimerRef.current) clearTimeout(cooldownTimerRef.current);
+    };
+  }, []);
 
   const toggleMic = useCallback(() => {
+    if (isCoolingDown) return; // Block mic during cooldown
     if (isListening) {
       stopListening();
     } else {
       stopSpeech();
       startListening();
     }
-  }, [isListening, startListening, stopListening, stopSpeech]);
+  }, [isListening, isCoolingDown, startListening, stopListening, stopSpeech]);
 
   if (!sttSupported) {
     return (
@@ -102,9 +126,10 @@ export function VoicePanel({
     <div className="voice-panel">
       {/* Mic button */}
       <button
-        className={`voice-mic-btn ${isListening ? "listening" : ""} ${isSpeaking ? "speaking" : ""}`}
+        className={`voice-mic-btn ${isListening ? "listening" : ""} ${isSpeaking ? "speaking" : ""} ${isCoolingDown ? "cooldown" : ""}`}
         onClick={toggleMic}
-        title={isListening ? "Stop listening" : "Start talking to IntentLens"}
+        title={isCoolingDown ? "Please wait…" : isListening ? "Stop listening" : "Start talking to IntentLens"}
+        disabled={isCoolingDown}
       >
         {isListening ? (
           <MicActiveIcon />
@@ -132,8 +157,11 @@ export function VoicePanel({
             Speaking
           </span>
         )}
-        {!isListening && !isThinking && !isSpeaking && agentResponse && (
+        {!isListening && !isThinking && !isSpeaking && agentResponse && !isCoolingDown && (
           <span className="voice-status-idle">Ready</span>
+        )}
+        {isCoolingDown && !isThinking && !isSpeaking && (
+          <span className="voice-status-cooldown">Cooldown…</span>
         )}
       </div>
 

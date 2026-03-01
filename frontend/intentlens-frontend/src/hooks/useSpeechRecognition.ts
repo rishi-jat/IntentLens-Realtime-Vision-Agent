@@ -1,13 +1,14 @@
 /**
- * useSpeechRecognition — Web Speech API STT hook.
+ * useSpeechRecognition — Web Speech API STT hook (v2 — Stabilized).
  *
- * Provides continuous speech-to-text via the browser's built-in
- * SpeechRecognition API (free, no external service needed).
+ * Key design:
+ * - Only emits final transcripts (ignores partial for triggering).
+ * - 1000ms silence debounce before marking complete.
+ * - Clean state management, no duplicate triggers.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// Web Speech API — vendor-prefixed in most browsers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SpeechRecognitionInstance = any;
 
@@ -18,23 +19,18 @@ function getSpeechRecognitionCtor(): (new () => SpeechRecognitionInstance) | nul
 }
 
 export interface UseSpeechRecognitionReturn {
-  /** Whether we are currently listening */
   isListening: boolean;
-  /** The latest finalised transcript */
   transcript: string;
-  /** Interim (live) partial transcript while speaking */
   interimTranscript: string;
-  /** True when listening stopped and transcript is ready to send */
   isComplete: boolean;
-  /** Start listening */
   startListening: () => void;
-  /** Stop listening */
   stopListening: () => void;
-  /** Whether the browser supports the Web Speech API */
   isSupported: boolean;
-  /** Last error, if any */
   error: string | null;
 }
+
+/** Silence before auto-stop (ms) */
+const SILENCE_DEBOUNCE_MS = 1000;
 
 export function useSpeechRecognition(): UseSpeechRecognitionReturn {
   const [isListening, setIsListening] = useState(false);
@@ -44,14 +40,19 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
   const [error, setError] = useState<string | null>(null);
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
-  const isSupported = typeof window !== "undefined" && getSpeechRecognitionCtor() !== null;
-  const sendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const silenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  
-  /** Auto-send transcript after 1 second of silence */
-  const SILENCE_DURATION_MS = 1000;
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accumulatedRef = useRef("");
 
-  // Create recognition instance lazily
+  const isSupported =
+    typeof window !== "undefined" && getSpeechRecognitionCtor() !== null;
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
   const getRecognition = useCallback(() => {
     if (recognitionRef.current) return recognitionRef.current;
 
@@ -79,29 +80,27 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
       }
 
       if (finalText) {
-        // Accumulate final segments instead of overwriting
-        setTranscript((prev) => (prev ? prev + " " + finalText.trim() : finalText.trim()));
+        const trimmed = finalText.trim();
+        accumulatedRef.current = accumulatedRef.current
+          ? accumulatedRef.current + " " + trimmed
+          : trimmed;
+        setTranscript(accumulatedRef.current);
         setInterimTranscript("");
-        
-        // Reset silence timer on new speech
-        if (silenceTimeoutRef.current) {
-          clearTimeout(silenceTimeoutRef.current);
-        }
-        
-        // Auto-stop after 1s silence
-        silenceTimeoutRef.current = setTimeout(() => {
+
+        // Reset silence timer — user just spoke
+        clearSilenceTimer();
+        silenceTimerRef.current = setTimeout(() => {
           if (recognitionRef.current) {
-            recognitionRef.current.stop();
+            try { recognitionRef.current.stop(); } catch { /* */ }
           }
-        }, SILENCE_DURATION_MS);
-      } else {
+        }, SILENCE_DEBOUNCE_MS);
+      } else if (interimText) {
         setInterimTranscript(interimText);
       }
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onerror = (event: any) => {
-      // "no-speech" and "aborted" are not real errors
       if (event.error === "no-speech" || event.error === "aborted") return;
       setError(event.error);
       setIsListening(false);
@@ -109,23 +108,28 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
 
     recognition.onend = () => {
       setIsListening(false);
-      // Signal that accumulated transcript is ready to send
-      setIsComplete(true);
+      setInterimTranscript("");
+      // Only complete if we have a final transcript
+      if (accumulatedRef.current.trim()) {
+        setIsComplete(true);
+      }
     };
 
     recognitionRef.current = recognition;
     return recognition;
-  }, []);
+  }, [clearSilenceTimer]);
 
   const startListening = useCallback(() => {
     setError(null);
     setTranscript("");
     setInterimTranscript("");
     setIsComplete(false);
+    accumulatedRef.current = "";
+    clearSilenceTimer();
 
     const recognition = getRecognition();
     if (!recognition) {
-      setError("Speech recognition not supported in this browser");
+      setError("Speech recognition not supported");
       return;
     }
 
@@ -133,32 +137,27 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
       recognition.start();
       setIsListening(true);
     } catch {
-      // Already started — ignore
+      // Already started
     }
-  }, [getRecognition]);
+  }, [getRecognition, clearSilenceTimer]);
 
   const stopListening = useCallback(() => {
+    clearSilenceTimer();
     const recognition = recognitionRef.current;
     if (recognition) {
-      try {
-        recognition.stop();
-      } catch {
-        // Already stopped
-      }
+      try { recognition.stop(); } catch { /* */ }
     }
     setIsListening(false);
-  }, []);
+  }, [clearSilenceTimer]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
+      clearSilenceTimer();
       if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch { /* noop */ }
+        try { recognitionRef.current.stop(); } catch { /* */ }
       }
-      if (sendTimeoutRef.current) clearTimeout(sendTimeoutRef.current);
-      if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
     };
-  }, []);
+  }, [clearSilenceTimer]);
 
   return {
     isListening,

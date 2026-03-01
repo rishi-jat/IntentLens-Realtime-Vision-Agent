@@ -105,6 +105,10 @@ _VOICE_SYSTEM_PROMPT = (
 class LLMReasoner:
     """Rate-limited LLM reasoning over structured behavioural data."""
 
+    # Global call budget: max 10 LLM calls per 60 seconds
+    _global_call_timestamps: list[float] = []
+    MAX_CALLS_PER_MINUTE: int = 10
+
     def __init__(self, openai_api_key: str) -> None:
         self._client: Optional[OpenAI] = (
             OpenAI(api_key=openai_api_key) if openai_api_key else None
@@ -120,6 +124,19 @@ class LLMReasoner:
     @property
     def available(self) -> bool:
         return self._client is not None
+
+    def _check_global_budget(self) -> bool:
+        """Return True if we are within the global LLM call budget."""
+        now = time.time()
+        # Prune old timestamps
+        LLMReasoner._global_call_timestamps = [
+            ts for ts in LLMReasoner._global_call_timestamps if now - ts < 60.0
+        ]
+        return len(LLMReasoner._global_call_timestamps) < self.MAX_CALLS_PER_MINUTE
+
+    def _record_call(self) -> None:
+        """Record that an LLM call was made."""
+        LLMReasoner._global_call_timestamps.append(time.time())
 
     # ------------------------------------------------------------------
     # Per-person intent (rate-limited)
@@ -155,6 +172,10 @@ class LLMReasoner:
         if person.dwell_time < LLM_MIN_DWELL_FOR_CALL and not person.zones_entered:
             return cached or _DEFAULT_RESULT
 
+        if not self._check_global_budget():
+            logger.debug("Global LLM budget exhausted — returning cached for person %d", person.track_id)
+            return cached or _DEFAULT_RESULT
+
         prompt = self._build_person_prompt(person, signals)
         result = self._call_llm(prompt)
 
@@ -181,6 +202,10 @@ class LLMReasoner:
             return self._cached_scene
 
         if not self.available or not all_signals:
+            return self._cached_scene
+
+        if not self._check_global_budget():
+            logger.debug("Global LLM budget exhausted — returning cached scene")
             return self._cached_scene
 
         prompt = self._build_scene_prompt(scene, all_signals, scene_graph)
@@ -324,61 +349,55 @@ class LLMReasoner:
 
         model = VLM_MODEL if isinstance(user_content, list) else LLM_MODEL
 
-        # Retry with backoff (handles rate limits). Keep retries low to limit total latency.
-        max_retries = 1
-        for attempt in range(max_retries + 1):
-            try:
-                start = time.perf_counter()
+        # No retry loop — fail fast on errors, respect rate limits
+        try:
+            if not self._check_global_budget():
+                logger.warning("Global LLM budget exhausted for voice query")
+                return "I'm taking a short break to manage my resources. Try again in a moment."
 
-                messages: list[dict] = [
-                    {"role": "system", "content": _VOICE_SYSTEM_PROMPT},
-                ]
-                messages.extend(self._conversation_history[-self._max_conversation_turns:])
-                messages.append({"role": "user", "content": user_content})
+            start = time.perf_counter()
 
-                response = self._client.chat.completions.create(  # type: ignore[union-attr]
-                    model=model,
-                    messages=messages,
-                    max_tokens=200,
-                    temperature=0.4,
-                    timeout=10.0,  # 10s — enough for vision model cold starts
-                )
-                elapsed = (time.perf_counter() - start) * 1000
-                logger.info("Voice query completed in %.0fms (model=%s, attempt=%d)", elapsed, model, attempt)
-                answer = response.choices[0].message.content or "I didn't catch that."
+            messages: list[dict] = [
+                {"role": "system", "content": _VOICE_SYSTEM_PROMPT},
+            ]
+            messages.extend(self._conversation_history[-self._max_conversation_turns:])
+            messages.append({"role": "user", "content": user_content})
 
-                # Store in conversation history
-                self._conversation_history.append({"role": "user", "content": transcript})
-                self._conversation_history.append({"role": "assistant", "content": answer})
-                if len(self._conversation_history) > self._max_conversation_turns * 2:
-                    self._conversation_history = self._conversation_history[-self._max_conversation_turns:]
+            response = self._client.chat.completions.create(  # type: ignore[union-attr]
+                model=model,
+                messages=messages,
+                max_tokens=200,
+                temperature=0.4,
+                timeout=10.0,
+            )
+            self._record_call()
+            elapsed = (time.perf_counter() - start) * 1000
+            logger.info("Voice query completed in %.0fms (model=%s)", elapsed, model)
+            answer = response.choices[0].message.content or "I didn't catch that."
 
-                return answer
+            # Store in conversation history
+            self._conversation_history.append({"role": "user", "content": transcript})
+            self._conversation_history.append({"role": "assistant", "content": answer})
+            if len(self._conversation_history) > self._max_conversation_turns * 2:
+                self._conversation_history = self._conversation_history[-self._max_conversation_turns:]
 
-            except Exception as exc:
-                exc_name = type(exc).__name__
-                exc_str = str(exc).lower()
-                logger.warning("Voice query attempt %d failed: %s (%s)", attempt, exc, exc_name)
+            return answer
 
-                # Quota exhausted — no point retrying, fail immediately
-                if "insufficient_quota" in exc_str or "billing" in exc_str:
-                    logger.error("OpenAI quota exhausted — cannot make LLM calls")
-                    return "I can't respond right now — my AI service quota has been exceeded. Please check the API billing."
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            logger.warning("Voice query failed: %s", exc)
 
-                # On rate limit, retry after backoff; on last attempt, fall back to text-only
-                if attempt < max_retries:
-                    import time as _time
-                    _time.sleep(0.5 * (attempt + 1))
+            # Quota exhausted — fail immediately, no retry
+            if "insufficient_quota" in exc_str or "billing" in exc_str:
+                logger.error("OpenAI quota exhausted — cannot make LLM calls")
+                return "I can't respond right now — my AI service quota has been exceeded."
 
-                    # If vision model hit rate limit, fall back to text-only model
-                    if model == VLM_MODEL and "rate" in exc_str:
-                        logger.info("Rate limited on %s — falling back to %s (text-only)", VLM_MODEL, LLM_MODEL)
-                        model = LLM_MODEL
-                        user_content = user_text
-                else:
-                    # Final fallback
-                    logger.error("Voice query failed after %d attempts: %s", max_retries + 1, exc, exc_info=True)
-                    return self._build_fallback_voice_response(scene_context, transcript)
+            # Rate limited — fail immediately, no retry
+            if "rate" in exc_str or "429" in exc_str:
+                logger.warning("Rate limited — returning fallback")
+                return "I'm being rate limited. Please wait a moment before asking again."
+
+            return self._build_fallback_voice_response(scene_context, transcript)
 
     # ------------------------------------------------------------------
     # Internal
@@ -397,6 +416,7 @@ class LLMReasoner:
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
             )
+            self._record_call()
             elapsed = (time.perf_counter() - start) * 1000
             logger.info("LLM call completed in %.0fms", elapsed)
 

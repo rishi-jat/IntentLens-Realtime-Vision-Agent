@@ -49,6 +49,10 @@ from behavior_engine import BehaviorEngine  # noqa: E402
 
 _engine: BehaviorEngine | None = None
 
+# Server-side voice rate limiter
+_last_voice_query_ts: float = 0.0
+VOICE_COOLDOWN_SECS: float = 3.0
+
 
 def _get_engine() -> BehaviorEngine:
     if _engine is None:
@@ -434,7 +438,16 @@ async def visual_qa(request: VisualQARequest) -> VisualQAResponse:
 
 @app.post("/voice_query", response_model=VoiceQueryResponse)
 async def voice_query(request: VoiceQueryRequest) -> VoiceQueryResponse:
-    """Conversational voice query with scene context."""
+    """Conversational voice query with scene context (rate-limited)."""
+    global _last_voice_query_ts
+    now = time.time()
+    if now - _last_voice_query_ts < VOICE_COOLDOWN_SECS:
+        raise HTTPException(
+            status_code=429,
+            detail="Voice cooldown active — please wait a few seconds.",
+        )
+    _last_voice_query_ts = now
+
     engine = _get_engine()
     frame = _decode_frame(request.frame) if request.frame else None
     loop = asyncio.get_event_loop()
